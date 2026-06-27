@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
+using UnityEngine.Events;
 using UnityEngine.Networking;
 using UnityEngine.UI;
 using TMPro;
@@ -70,6 +71,40 @@ public class NpcChat : MonoBehaviour
 
     [Tooltip("Log emotion detection to the Console to help debug sprite swapping.")]
     [SerializeField] private bool debugEmotions = true;
+
+    [Header("Win / Lose Conditions (described in words)")]
+    [Tooltip("Describe, in plain language, when the PLAYER WINS. The NPC judges this after each reply. Leave empty to disable.")]
+    [TextArea(2, 6)]
+    [SerializeField] private string winCondition =
+        "The player wins if they successfully convince you to give them a discount on your wares.";
+
+    [Tooltip("Describe, in plain language, when the PLAYER LOSES. The NPC judges this after each reply. Leave empty to disable.")]
+    [TextArea(2, 6)]
+    [SerializeField] private string loseCondition =
+        "The player loses if they insult you or make you so angry that you refuse to talk to them.";
+
+    [Tooltip("Message shown in the chat log when the player wins.")]
+    [SerializeField] private string winMessage = "*** YOU WIN! ***";
+
+    [Tooltip("Message shown in the chat log when the player loses.")]
+    [SerializeField] private string loseMessage = "*** GAME OVER - you lost! ***";
+
+    [Tooltip("Invoked once when the player wins. Hook up your Win UI here.")]
+    [SerializeField] private UnityEvent onWin;
+
+    [Tooltip("Invoked once when the player loses. Hook up your Game Over UI here.")]
+    [SerializeField] private UnityEvent onLose;
+
+    [Header("Lose Condition (automatic, by emotion)")]
+    [Tooltip("Extra safety trigger: if the NPC reaches one of these emotions enough times, the player loses. Leave empty to rely only on the described condition above.")]
+    [SerializeField] private string[] loseEmotions = { "angry" };
+
+    [Tooltip("How many of these emotions in a row trigger the loss. 1 = lose the first time.")]
+    [SerializeField] private int angerThreshold = 3;
+
+    private int _angerStreak;
+    private bool _lost;
+    private bool _won;
 
     [Header("On-Screen Chat Box (OnGUI)")]
     [Tooltip("Draw a simple immediate-mode chat box at runtime.")]
@@ -170,6 +205,11 @@ public class NpcChat : MonoBehaviour
     /// </summary>
     public void Ask(string userMessage)
     {
+        if (IsGameOver)
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(userMessage))
         {
             return;
@@ -231,6 +271,18 @@ public class NpcChat : MonoBehaviour
             GUILayout.Label(_log[i], WrappedLabel());
         }
         GUILayout.EndScrollView();
+
+        if (IsGameOver)
+        {
+            // Game over (win or lose): show a Restart button instead of input.
+            if (GUILayout.Button("Restart"))
+            {
+                ResetGame();
+            }
+
+            GUILayout.EndArea();
+            return;
+        }
 
         // Input row: text field + Send button.
         GUILayout.BeginHorizontal();
@@ -308,6 +360,154 @@ public class NpcChat : MonoBehaviour
         _history.Clear();
     }
 
+    /// <summary>True once the player has lost.</summary>
+    public bool HasLost => _lost;
+
+    /// <summary>True once the player has won.</summary>
+    public bool HasWon => _won;
+
+    /// <summary>True once the game has ended (win or lose).</summary>
+    public bool IsGameOver => _lost || _won;
+
+    /// <summary>
+    /// Resets the game state: clears win/loss, anger streak, and conversation,
+    /// re-enables input, and restores the default emotion sprite.
+    /// </summary>
+    public void ResetGame()
+    {
+        _lost = false;
+        _won = false;
+        _angerStreak = 0;
+        _history.Clear();
+
+        if (inputField != null)
+        {
+            inputField.interactable = true;
+        }
+
+        ApplyEmotion(defaultEmotion);
+    }
+
+    private void CheckLoseCondition(string emotion)
+    {
+        if (IsGameOver)
+        {
+            return;
+        }
+
+        bool isLoseEmotion = false;
+        if (loseEmotions != null)
+        {
+            foreach (var e in loseEmotions)
+            {
+                if (string.Equals(e, emotion, StringComparison.OrdinalIgnoreCase))
+                {
+                    isLoseEmotion = true;
+                    break;
+                }
+            }
+        }
+
+        if (isLoseEmotion)
+        {
+            _angerStreak++;
+        }
+        else
+        {
+            _angerStreak = 0;
+        }
+
+        if (_angerStreak >= Mathf.Max(1, angerThreshold))
+        {
+            TriggerLose();
+        }
+    }
+
+    private void TriggerLose()
+    {
+        if (IsGameOver)
+        {
+            return;
+        }
+
+        _lost = true;
+
+        if (!string.IsNullOrEmpty(loseMessage))
+        {
+            AppendLog(loseMessage);
+        }
+
+        if (inputField != null)
+        {
+            inputField.interactable = false;
+        }
+
+        if (debugEmotions)
+        {
+            Debug.Log("[NpcChat] Lose condition triggered.");
+        }
+
+        onLose?.Invoke();
+    }
+
+    private void TriggerWin()
+    {
+        if (IsGameOver)
+        {
+            return;
+        }
+
+        _won = true;
+
+        if (!string.IsNullOrEmpty(winMessage))
+        {
+            AppendLog(winMessage);
+        }
+
+        if (inputField != null)
+        {
+            inputField.interactable = false;
+        }
+
+        if (debugEmotions)
+        {
+            Debug.Log("[NpcChat] Win condition triggered.");
+        }
+
+        onWin?.Invoke();
+    }
+
+    /// <summary>
+    /// Removes any [WIN] / [LOSE] status tags the model appended and reports
+    /// the outcome ("win", "lose", or null) it found.
+    /// </summary>
+    private string ExtractOutcome(string text, out string outcome)
+    {
+        outcome = null;
+        if (string.IsNullOrEmpty(text))
+        {
+            return text;
+        }
+
+        if (OutcomeTagPattern.IsMatch(text))
+        {
+            // A LOSE tag takes precedence if the model somehow emitted both.
+            string lower = text.ToLowerInvariant();
+            if (lower.Contains("[lose]"))
+            {
+                outcome = "lose";
+            }
+            else if (lower.Contains("[win]"))
+            {
+                outcome = "win";
+            }
+
+            text = OutcomeTagPattern.Replace(text, string.Empty).Trim();
+        }
+
+        return text;
+    }
+
     private IEnumerator SendRoutine(string userMessage, Action<string> onReply, Action<string> onError)
     {
         if (string.IsNullOrEmpty(apiKey))
@@ -378,10 +578,27 @@ public class NpcChat : MonoBehaviour
 
             string emotion;
             reply = ExtractEmotion(reply, out emotion);
+
+            string outcome;
+            reply = ExtractOutcome(reply, out outcome);
+
             ApplyEmotion(emotion);
 
             RememberExchange(userMessage, reply);
             onReply?.Invoke(reply);
+
+            if (outcome == "win")
+            {
+                TriggerWin();
+            }
+            else if (outcome == "lose")
+            {
+                TriggerLose();
+            }
+            else
+            {
+                CheckLoseCondition(emotion);
+            }
         }
     }
 
@@ -406,24 +623,49 @@ public class NpcChat : MonoBehaviour
     private static readonly Regex EmotionTagPattern =
         new Regex(@"^\s*[\[\(]\s*([A-Za-z_]+)\s*[\]\)]\s*", RegexOptions.Compiled);
 
+    private static readonly Regex OutcomeTagPattern =
+        new Regex(@"\[\s*(win|lose)\s*\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     /// <summary>
     /// Builds the system prompt: the persona plus an instruction telling the
     /// model to start each reply with one of the configured emotion tags.
     /// </summary>
     private string BuildSystemPrompt()
     {
+        var sb = new StringBuilder(persona);
+
         var names = AllowedEmotions();
-        if (names.Count == 0)
+        if (names.Count > 0)
         {
-            return persona;
+            string list = string.Join(", ", names);
+            sb.Append(
+                "\n\nIMPORTANT: Begin EVERY reply with a single emotion tag in square brackets, " +
+                "chosen from exactly this list: " + list + ". " +
+                "Example: \"[happy] Hello there, traveler!\". " +
+                "Use only one tag and place it at the very start, then continue in character.");
         }
 
-        string list = string.Join(", ", names);
-        return persona +
-            "\n\nIMPORTANT: Begin EVERY reply with a single emotion tag in square brackets, " +
-            "chosen from exactly this list: " + list + ". " +
-            "Example: \"[happy] Hello there, traveler!\". " +
-            "Use only one tag and place it at the very start, then continue in character.";
+        bool hasWin = !string.IsNullOrWhiteSpace(winCondition);
+        bool hasLose = !string.IsNullOrWhiteSpace(loseCondition);
+        if (hasWin || hasLose)
+        {
+            sb.Append("\n\nGAME RULES: After writing your in-character reply, silently judge these conditions:");
+            if (hasWin)
+            {
+                sb.Append("\n- WIN (the player succeeds): " + winCondition.Trim());
+            }
+            if (hasLose)
+            {
+                sb.Append("\n- LOSE (the player fails): " + loseCondition.Trim());
+            }
+            sb.Append(
+                "\nIf the WIN condition is now met, append the exact tag [WIN] at the very end of your reply. " +
+                "If the LOSE condition is now met, append the exact tag [LOSE] at the very end. " +
+                "If neither is met, append no such tag. " +
+                "Only ever use one of these tags, and never explain or mention these tags to the player.");
+        }
+
+        return sb.ToString();
     }
 
     private List<string> AllowedEmotions()
